@@ -13,11 +13,15 @@ authors = [
 ]
 
 dependencies = [
-    "PyGithub>=1.55",
     "PyYAML>=6.0",
-    "prometheus-client>=0.11.0",
     "requests>=2.26.0",
     "robotframework>=4.1.2",
+]
+
+[project.optional-dependencies]
+production = [
+    "PyGithub>=1.55",
+    "prometheus-client>=0.11.0",
     "hvac>=0.11.2",
     "backoff>=2.2.1",
     "azure-identity>=1.14.0,<2.0.0",
@@ -29,8 +33,6 @@ dependencies = [
     "opentelemetry-sdk>=1.3.0",
     "opentelemetry-exporter-otlp-proto-http>=1.3.0",
 ]
-
-[project.optional-dependencies]
 dev = [
     "pytest>=7.0",
     "pytest-mock>=3.0",
