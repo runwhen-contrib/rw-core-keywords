@@ -20,7 +20,7 @@ Set `RW_MODE=dev` in your environment to activate dev mode.
 **For production runtime images:**
 
 ```bash
-pip install "rw-core-keywords[production]"
+pip install rw-core-keywords
 ```
 
 Includes all cloud provider SDKs, OpenTelemetry, Vault client, and other

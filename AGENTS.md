@@ -51,7 +51,7 @@ required.
 
 Base dependencies (all modes): `PyYAML`, `requests`, `robotframework`.
 
-Production extras (`pip install "rw-core-keywords[production]"`): azure, k8s,
+All dependencies are installed by default (`pip install rw-core-keywords`): azure, k8s,
 opentelemetry, hvac, prometheus-client, backoff, PyGithub.
 
 When adding a new dependency, decide whether it's needed in dev mode. If not,
