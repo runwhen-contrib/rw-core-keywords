@@ -1,0 +1,37 @@
+name: Generate Keyword Documentation
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'src/**'
+      - '.github/workflows/keyword-docs.yml'
+  workflow_dispatch:
+    inputs:
+      doc_type:
+        description: 'Type of documentation to generate'
+        required: true
+        default: 'markdown'
+        type: choice
+        options:
+          - markdown
+          - confluence
+          - both
+
+permissions:
+  contents: write
+
+jobs:
+  generate-docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Generate Keyword Documentation
+        uses: runwhen-contrib/github-actions/runwhen-keyword-docs-generator@keyword-doc-generator
+        with:
+          doc_type: ${{ github.event.inputs.doc_type || 'markdown' }}
+          libraries_path: src/RW
+          commit_changes: 'true'
+          commit_message: 'docs: update keyword documentation [skip ci]'

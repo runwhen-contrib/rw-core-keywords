@@ -6,33 +6,36 @@ Scope: Global
 
 import re
 import os
-import socket
-import shutil
-from urllib.parse import urlparse
-import requests
-from typing import Union, List, Dict
-from prometheus_client import CollectorRegistry
-from robot.libraries.BuiltIn import BuiltIn
-from RW import platform, fetchsecrets
-
 import json, typing
 import textwrap
 import datetime
+import logging
 from collections import OrderedDict
+from typing import Union, List, Dict
+from robot.libraries.BuiltIn import BuiltIn
+from RW import platform
+from RW._mode import is_dev_mode
 
-from opentelemetry import metrics
-from opentelemetry.sdk.resources import Resource
-from opentelemetry.sdk.metrics import MeterProvider
-from opentelemetry.sdk.metrics.export import (
-    PeriodicExportingMetricReader,
-)
-from opentelemetry.exporter.otlp.proto.http.metric_exporter import OTLPMetricExporter
+if not is_dev_mode():
+    import socket
+    from urllib.parse import urlparse
+    import requests
+    from prometheus_client import CollectorRegistry
+    from RW import fetchsecrets
 
+    from opentelemetry import metrics
+    from opentelemetry.sdk.resources import Resource
+    from opentelemetry.sdk.metrics import MeterProvider
+    from opentelemetry.sdk.metrics.export import (
+        PeriodicExportingMetricReader,
+    )
+    from opentelemetry.exporter.otlp.proto.http.metric_exporter import OTLPMetricExporter
 
-registry = CollectorRegistry()
-prometheus_gchs = {}
+    registry = CollectorRegistry()
+    prometheus_gchs = {}
 
 SHARED_LOCATION_SERVICES_NAMESPACE = "location"
+logger = logging.getLogger(__name__)
 
 
 class Core:
@@ -115,9 +118,13 @@ class Core:
 
 
     def about_fetchsecrets_plugin(self):
+        if is_dev_mode():
+            return {"mode": "dev", "provider": "env/file"}
         return fetchsecrets.about()
 
     def health_check_fetchsecrets_plugin(self):
+        if is_dev_mode():
+            return True
         return fetchsecrets.health_check()
 
     def get_authenticated_session(self):
@@ -125,14 +132,17 @@ class Core:
 
     def rw_get(self, path, params):
         session = self.get_authenticated_session()
-        return session.get(path, params=params, verify=fetchsecrets.REQUEST_VERIFY)
+        return session.get(path, params=params, verify=platform.REQUEST_VERIFY)
 
     def rw_post(self, path, data):
         session = self.get_authenticated_session()
-        return session.post(path, data=data, verify=fetchsecrets.REQUEST_VERIFY)
+        return session.post(path, data=data, verify=platform.REQUEST_VERIFY)
 
     def import_secret(self, varname: str, description: str = None, example: str = None, pattern: str = None, optional: bool = False, **kwargs):
         """Import a secret from the configured secret provider.
+        
+        In dev mode, secrets are resolved from environment variables with optional
+        remapping via RW_SECRET_REMAP and file-based values via RW_FROM_FILE.
         
         Args:
             varname: The variable name for the secret
@@ -148,6 +158,9 @@ class Core:
         Raises:
             ImportError: If secret not found and optional=False
         """
+        if is_dev_mode():
+            return self._import_secret_dev(varname, optional=optional)
+
         try:
             env_var_url = "RW_SECRETS_KEYS"
             skeys_json_str = os.getenv(env_var_url)
@@ -197,38 +210,50 @@ class Core:
             
             raise ImportError(f"Import Secret {varname}: {str(e)}")
     
+    def _import_secret_dev(self, varname: str, optional: bool = False):
+        """Dev mode: resolve secrets from env vars and local files."""
+        secret_remaps = json.loads(os.getenv("RW_SECRET_REMAP", "{}"))
+        secrets_from_files = json.loads(os.getenv("RW_FROM_FILE", "{}"))
+        key = secret_remaps.get(varname, varname)
+
+        if key in secrets_from_files:
+            with open(secrets_from_files[key]) as fh:
+                val = fh.read()
+        else:
+            val = os.getenv(key, "")
+
+        if not val and optional:
+            self.builtin.set_suite_variable("${" + varname + "}", None)
+            return None
+
+        ret = platform.Secret(varname, val)
+        self.builtin.set_suite_variable("${" + varname + "}", ret)
+        return ret
+
     def get_credential_cache_info(self):
-        """Get information about credential caching configuration.
-        
-        Returns:
-            dict: Cache configuration and shared filesystem directory info
-        """
+        """Get information about credential caching configuration."""
+        if is_dev_mode():
+            return {}
         try:
             return fetchsecrets.get_cache_stats()
         except Exception as e:
             self.error_log(f"Error getting cache info: {e}")
             return {}
-    
+
     def clear_secret_cache(self):
-        """Clear in-memory secret cache.
-        
-        Note: Credential caching is handled via shared filesystem directories.
-        """
+        """Clear in-memory secret cache."""
+        if is_dev_mode():
+            return
         try:
             fetchsecrets.clear_all_caches()
             self.info_log("Cleared in-memory secret cache")
         except Exception as e:
             self.error_log(f"Error clearing secret cache: {e}")
-    
+
     def log_credential_cache_status(self):
-        """Log comprehensive credential cache status for troubleshooting.
-        
-        This logs detailed information about:
-        - Current credential context and hash
-        - Cache directory locations and statistics
-        - Environment variables affecting credential context
-        - Authentication state for different providers
-        """
+        """Log comprehensive credential cache status for troubleshooting."""
+        if is_dev_mode():
+            return {}
         try:
             cache_info = fetchsecrets.log_credential_cache_status()
             self.info_log("Credential cache status logged - check logs for details")
@@ -316,8 +341,17 @@ class Core:
         quotes or brackets, e.g. the python call would look like enum="option-1,option-2,option-3" and the Robot
         call looks like enum=option-1,option-2,option-3.
         """
-        # IMPL note - this should *not* be exposed as a python interface, thus unavailable in
-        # RW.platform
+        if is_dev_mode():
+            env_remaps = json.loads(os.getenv("RW_ENV_REMAP", "{}"))
+            if varname in env_remaps:
+                val = os.getenv(env_remaps[varname], "")
+            else:
+                val = os.getenv(varname, "")
+            if default and not val:
+                val = default
+            self.builtin.set_suite_variable("${" + varname + "}", val)
+            return val
+
         if varname.startswith("RW_"):
             # Special case: Allow RW_LOOKBACK_WINDOW to be overridden as a user variable
             # ONLY for runbooks (not SLIs). Runbooks have RW_RUNREQUEST_ID set.
@@ -364,12 +398,16 @@ class Core:
         Imports a variable set by the platform, making it available in the robot runtime
         as a suite variable.
 
+        In dev mode, delegates to import_user_variable (reads from env vars).
+
         Raises ValueError if this isn't a valid platform variable name, or ImportError if not available.
 
         :param str: Name to be used both to lookup the config val and for the
             variable name in robot
         :return: The value found
         """
+        if is_dev_mode():
+            return self.import_user_variable(varname, *args, **kwargs)
         val = platform.import_platform_variable(varname)
         self.builtin.set_suite_variable("${" + varname + "}", val)
         return val
@@ -382,17 +420,23 @@ class Core:
         found, simply return None.
         Like Import Platform Variable, this will both set a suite level variable
         to key with the value found and will return the value.
+
+        In dev mode, reads from file paths specified in RW_MEMO_FILE env var.
         """
         val = platform.import_memo_variable(key)
         self.builtin.set_suite_variable("${" + key + "}", val)
         return val
 
     def upload_session_file(self, filename: str, contents: str):
-        """Expose platform.fetchfiles as robot keywords"""
+        """Expose platform.fetchfiles as robot keywords.
+        In dev mode, this is a no-op.
+        """
         return platform.upload_session_file(filename, contents)
 
     def get_session_file(self, filename: str):
-        """Returns the contents of a session file, or None if the file did not exist"""
+        """Returns the contents of a session file, or None if the file did not exist.
+        In dev mode, returns None.
+        """
         return platform.get_session_file(filename)
 
     def run_keyword_and_push_metric(self, name: str, *args) -> None:
@@ -448,9 +492,15 @@ class Core:
     ):
         """
         Push a metric to an OpenTelemetry Collector if self.otel_enabled == True.
-        If OTEL is not initialized, we attempt to re-init. Includes minimal retry logic.
+        In dev mode, logs the metric to console.
         """
-        # Attempt to coerce the incoming value to int/float if possible
+        if is_dev_mode():
+            self.builtin.log_to_console(
+                f"\nPush metric: value:{value} sub_name:{sub_name} "
+                f"metric_type:{metric_type} labels:{kwargs}\n"
+            )
+            return value
+
         value = self._coerce_to_numeric(value)
 
         labels = kwargs if kwargs else {}
@@ -614,9 +664,9 @@ class Core:
     def add_issue(self,
         severity: int,
         title: str,
-        expected: str,
-        actual: str,
-        reproduce_hint: str,
+        expected: str = "",
+        actual: str = "",
+        reproduce_hint: str = "",
         observed_at: str = None,
         next_steps: str = None,
         details: str = None,
@@ -624,27 +674,21 @@ class Core:
         **kwargs
         ) -> None:
         """
-        Generic keyword used to raise a human-facing issue.  Unlike reports that are intended
-        to help recreate
-        
-        Args:
-            severity: Issue severity level (use Core.SEV_1, SEV_2, SEV_3, or SEV_4)
-            title: Brief title describing the issue
-            expected: What was expected to happen
-            actual: What actually happened
-            reproduce_hint: Instructions on how to reproduce the issue
-            next_steps: Optional recommended next steps to resolve the issue
-            details: Optional additional details about the issue
-            observed_at: Timestamp of when the issue was observed
-            summary: str, issue-summary sent by codebundle, if available skip issue-summarization via LLM
-            **kwargs: Additional custom fields to include in the issue record
-        
-        The **kwargs allow you to add custom fields to the issue record, which will be
-        included in both the issues.jsonl file and the report object. Examples:
-        - component="database", environment="production"
-        - priority="high", assignee="team-lead"
-        - tags=["urgent", "outage"], custom_field="custom_value"
+        Generic keyword used to raise a human-facing issue.
+
+        In dev mode, logs to console. In production, writes to issues.jsonl.
         """
+        if is_dev_mode():
+            issue_str = (
+                f"\nRaising Issue: Severity: {severity}\n title: {title}\n"
+                f" expected: {expected}\n actual: {actual}\n"
+                f" reproduce hints: {reproduce_hint}\n details: {details}\n"
+                f" next_steps: {next_steps}\n kwargs: {kwargs}\n"
+            )
+            logger.info(issue_str)
+            self.builtin.log_to_console(issue_str)
+            return
+
         if not severity in [Core.SEV_1, Core.SEV_2, Core.SEV_3]:
             severity = Core.SEV_4
 
@@ -716,9 +760,13 @@ class Core:
         Generic keyword used to add to reports.  The common case is adding a string
         with "p" formatting, but this is intended to be extensible to include pre-formatted
         blocks, code blocks, links and potentially chart data.
+
+        In dev mode, logs to console. In production, writes to report.jsonl.
         """
-        # Serialize and deserialize object to json as both a deep copy and to
-        # suss out any errors
+        if is_dev_mode():
+            self.builtin.log_to_console(f"\n{obj}\n")
+            return
+
         obj_str = json.dumps(obj)
         obj = json.loads(obj_str)
         kwargs_str = json.dumps(kwargs)
