@@ -1,8 +1,6 @@
 """A set of python interfaces also exposed in RW.Core (and used outside of that)"""
 import time
 import requests, os, pprint, traceback, json
-from requests.exceptions import HTTPError, RequestException
-import backoff
 from typing import Union, Optional, List
 from dataclasses import dataclass, field
 from robot.api import logger as user_logger
@@ -10,12 +8,15 @@ from robot.api import Failure, Error, FatalError, logger
 from robot.libraries.BuiltIn import BuiltIn
 
 from . import proxy
+from ._mode import is_dev_mode
 
-REQUEST_VERIFY=proxy.get_request_verify()
+REQUEST_VERIFY = proxy.get_request_verify()
 
-from . import fetchsecrets
-from . import fetchfiles
-
+if not is_dev_mode():
+    from requests.exceptions import HTTPError, RequestException
+    import backoff
+    from . import fetchsecrets
+    from . import fetchfiles
 
 import logging
 
@@ -257,17 +258,26 @@ def console_log_if_true(condition: str, *msg) -> None:
 
 
 def form_access_token() -> str:
+    if is_dev_mode():
+        access_token = os.getenv("RW_ACCESS_TOKEN")
+        if not access_token:
+            doc_url = "https://docs.runwhen.com/public/platform-rest-api/getting-started-with-the-platform-rest-api"
+            raise Exception(
+                f"In dev mode, set RW_ACCESS_TOKEN in your environment. See {doc_url}"
+            )
+        return access_token
+
     global access_token_expiration_time
 
     base_url = os.getenv("RW_API_BASE_URL")
-    
+
     def is_retryable(e):
         """Determines whether the exception e should trigger a retry."""
         if isinstance(e, (requests.exceptions.Timeout, requests.exceptions.ConnectionError)):
-            return True  # Always retry on timeouts and connection errors
+            return True
         if isinstance(e, HTTPError):
-            return e.response.status_code == 503  # Retry on 503 Service Unavailable
-        return False  # Do not retry for other types of exceptions
+            return e.response.status_code == 503
+        return False
 
     @backoff.on_exception(backoff.expo,
                           RequestException,
@@ -284,13 +294,11 @@ def form_access_token() -> str:
             headers={"Accept": "application/json"},
             verify=REQUEST_VERIFY,
         )
-        rsp.raise_for_status()  # Raises HTTPError for 4XX or 5XX response
+        rsp.raise_for_status()
         return rsp.json()["access"]
 
     try:
         access_token = request_token()
-        # Set the expiration time for the access token. Currently, this is set to 1 day by the API.
-        # Reduce by an additional 60 seconds to account for skew.
         access_token_expiration_time = time.time() + 86400 - 60
         return access_token
     except HTTPError as e:
@@ -301,7 +309,7 @@ def form_access_token() -> str:
     except (RequestException, fetchsecrets.AuthenticationError, fetchsecrets.SecretNotFoundError) as e:
         platform_logger.error(f"Failed authentication: {str(e)}")
         platform_logger.exception(e)
-    
+
     return ""
 
 
@@ -349,6 +357,10 @@ def upload_session_file(filename: str, contents: str):
     a tuple of the fetchfiles response object and a url where the file can be fetched to allow for
     user-supplied get functions.
     """
+    if is_dev_mode():
+        debug_log(f"[dev] upload_session_file skipped for '{filename}' ({len(contents)} bytes)")
+        return None, None
+
     if not isinstance(contents, str):
         raise ValueError(f"Expected contents to be a string, but got contents type {type(contents)}")
     try:
@@ -361,6 +373,10 @@ def upload_session_file(filename: str, contents: str):
 
 def get_session_file(filename: str) -> str:
     """Returns the contents of a session file, or None if the file did not exist"""
+    if is_dev_mode():
+        debug_log(f"[dev] get_session_file skipped for '{filename}'")
+        return None
+
     try:
         session_id = import_platform_variable("RW_SESSION_ID")
     except ImportError:
@@ -372,6 +388,10 @@ def url_for_session_file(filename: str) -> str:
     """Returns the URL where this session file (if it exists) could be downloaded by other systems
     given appropriate credentials
     """
+    if is_dev_mode():
+        debug_log(f"[dev] url_for_session_file skipped for '{filename}'")
+        return None
+
     try:
         session_id = import_platform_variable("RW_SESSION_ID")
     except ImportError:
@@ -384,6 +404,17 @@ def import_memo_variable(key: str):
     a memo value.  Get the value for key within the memo, or None if there was no
     value found or if there was no memo provided (e.g. with an SLI)
     """
+    if is_dev_mode():
+        fkeys_json_str = os.getenv("RW_MEMO_FILE", "{}")
+        memos_from_files = json.loads(fkeys_json_str)
+        if key in memos_from_files:
+            with open(memos_from_files[key]) as fh:
+                return fh.read()
+        raise ValueError(
+            f"Memo key {key} not found. Set RW_MEMO_FILE env var, e.g. "
+            f'RW_MEMO_FILE=\'{{"{ key}":"/path/to/file"}}\''
+        )
+
     try:
         slx_api_url = import_platform_variable("RW_SLX_API_URL")
         runrequest_id = import_platform_variable("RW_RUNREQUEST_ID")
