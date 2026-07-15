@@ -66,6 +66,7 @@ def gcloud_login(project_id=None, service_account_key=None):
     
     try:
         # Capture the output and error for more detailed logs
+        adc_available = False  # set True in the ADC branch below
         if service_account_key and project_id:
             logger.info(f"CREDENTIAL_CACHE: Performing GCP Service Account login (project: {project_id})")
             print("Logging into GCP with Service Account credentials...")
@@ -94,17 +95,41 @@ def gcloud_login(project_id=None, service_account_key=None):
             logger.info(f"CREDENTIAL_CACHE: Performing GCP Application Default Credentials login")
             print("Using application default credentials for authentication")
             
-            result = subprocess.run([
-                "gcloud", "auth", "application-default", "login", "--no-launch-browser"
-            ], capture_output=True, text=True, check=True)
+            # Check whether ADC is already available from the environment
+            # (GCE/GKE metadata server, or a credentials file pointed to by
+            # GOOGLE_APPLICATION_CREDENTIALS). This mirrors how Azure Identity
+            # checks `_is_azure_cli_authenticated()` before calling `az login`,
+            # and how AWS IRSA detects `AWS_WEB_IDENTITY_TOKEN_FILE` /
+            # `AWS_CONTAINER_CREDENTIALS_FULL_URI` without running a login
+            # command — federated credentials come from the environment.
+            adc_available = False
+            try:
+                import google.auth
+                google.auth.default()
+                adc_available = True
+                logger.info("CREDENTIAL_CACHE: Application Default Credentials already available from environment")
+                print("Application Default Credentials already available from environment, skipping login")
+            except Exception:
+                pass
+            
+            if not adc_available:
+                # ADC not in the environment — local workstation or a pod
+                # without a metadata server. Use the gcloud CLI to bootstrap
+                # credentials. --quiet avoids the interactive prompt that
+                # fails on GCE VMs ("not in an interactive session").
+                result = subprocess.run([
+                    "gcloud", "auth", "application-default", "login",
+                    "--no-launch-browser", "--quiet"
+                ], capture_output=True, text=True, check=True)
             
             # Get project ID from gcloud if not provided
             if not project_id:
                 project_id = get_project_id(None)
         
         # Print the captured output and error logs
-        print("Login output:", result.stdout)
-        print("Login error output:", result.stderr)
+        if not adc_available:
+            print("Login output:", result.stdout)
+            print("Login error output:", result.stderr)
         
         logger.info(f"CREDENTIAL_CACHE: GCP authentication successful, credentials stored in {gcp_dir}")
         print("Login successful.")
