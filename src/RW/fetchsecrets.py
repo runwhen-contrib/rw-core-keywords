@@ -604,6 +604,13 @@ def read_secret(key: str, _recursion_stack=None):
     elif provider == "azure:sp":
         _current_secret_provider = SecretProvider.AZURE_SP
         logger("Provider matched as Azure Service Principal.", "DEBUG")
+    # GCP providers
+    elif provider == "gcp:adc":
+        _current_secret_provider = SecretProvider.GCP_ADC
+        logger("Provider matched as GCP Application Default Credentials.", "DEBUG")
+    elif provider == "gcp:sa":
+        _current_secret_provider = SecretProvider.GCP_SA
+        logger("Provider matched as GCP Service Account.", "DEBUG")
     # AWS providers
     elif provider == "aws:irsa":
         _current_secret_provider = SecretProvider.AWS_IRSA
@@ -693,7 +700,7 @@ def read_secret(key: str, _recursion_stack=None):
 
         elif _current_secret_provider == SecretProvider.CUSTOM:
             SECRET_PROVIDER_TYPE = os.getenv(f"SECRET_PROVIDER_{provider}_TYPE") #TODO: handle other vault types
-            key,field = key.split(":")
+            key, field = remaining_key.split(":", 1)
             if SECRET_PROVIDER_TYPE == "vault":
                 SECRET_PROVIDER_VAULT_ADDR = os.getenv(f"SECRET_PROVIDER_{provider}_VAULT_ADDR")
                 SECRET_PROVIDER_VAULT_AUTH_MOUNT_PATH = os.getenv(f"SECRET_PROVIDER_{provider}_VAULT_AUTH_MOUNT_PATH")

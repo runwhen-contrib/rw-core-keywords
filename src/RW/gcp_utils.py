@@ -66,6 +66,7 @@ def gcloud_login(project_id=None, service_account_key=None):
     
     try:
         # Capture the output and error for more detailed logs
+        adc_available = False  # set True in the ADC branch below
         if service_account_key and project_id:
             logger.info(f"CREDENTIAL_CACHE: Performing GCP Service Account login (project: {project_id})")
             print("Logging into GCP with Service Account credentials...")
@@ -94,17 +95,48 @@ def gcloud_login(project_id=None, service_account_key=None):
             logger.info(f"CREDENTIAL_CACHE: Performing GCP Application Default Credentials login")
             print("Using application default credentials for authentication")
             
-            result = subprocess.run([
-                "gcloud", "auth", "application-default", "login", "--no-launch-browser"
-            ], capture_output=True, text=True, check=True)
+            # Check whether ADC is already available from the environment
+            # (GCE/GKE metadata server, or a credentials file pointed to by
+            # GOOGLE_APPLICATION_CREDENTIALS). This mirrors how Azure Identity
+            # checks `_is_azure_cli_authenticated()` before calling `az login`,
+            # and how AWS IRSA detects `AWS_WEB_IDENTITY_TOKEN_FILE` /
+            # `AWS_CONTAINER_CREDENTIALS_FULL_URI` without running a login
+            # command — federated credentials come from the environment.
+            adc_available = False
+            try:
+                import google.auth
+                _, adc_project_id = google.auth.default()
+                adc_available = True
+                logger.info("CREDENTIAL_CACHE: Application Default Credentials already available from environment")
+                print("Application Default Credentials already available from environment, skipping login")
+                # google.auth.default() returns the project ID from the
+                # metadata server or credentials file — use it before
+                # falling back to gcloud config / env vars below.
+                if not project_id and adc_project_id:
+                    project_id = adc_project_id
+                    logger.info(f"CREDENTIAL_CACHE: Resolved project ID from ADC: {project_id}")
+            except Exception:
+                pass
             
-            # Get project ID from gcloud if not provided
+            if not adc_available:
+                # ADC not in the environment — local workstation or a pod
+                # without a metadata server. Use the gcloud CLI to bootstrap
+                # credentials. --quiet avoids the interactive prompt that
+                # fails on GCE VMs ("not in an interactive session").
+                result = subprocess.run([
+                    "gcloud", "auth", "application-default", "login",
+                    "--no-launch-browser", "--quiet"
+                ], capture_output=True, text=True, check=True)
+            
+            # Get project ID from gcloud config / env vars as a fallback
+            # (ADC may not always return one).
             if not project_id:
                 project_id = get_project_id(None)
         
         # Print the captured output and error logs
-        print("Login output:", result.stdout)
-        print("Login error output:", result.stderr)
+        if not adc_available:
+            print("Login output:", result.stdout)
+            print("Login error output:", result.stderr)
         
         logger.info(f"CREDENTIAL_CACHE: GCP authentication successful, credentials stored in {gcp_dir}")
         print("Login successful.")
@@ -182,9 +214,24 @@ def get_gcp_credential(project_id=None, service_account_key=None):
     
     return result
 
+GKE_OAUTH_SCOPES = ["https://www.googleapis.com/auth/cloud-platform"]
+
+
 def generate_kubeconfig_for_gke(cluster_name, zone_or_region, project_id=None, service_account_key=None):
     """
-    Generate kubeconfig for GKE cluster using gcloud get-credentials.
+    Generate kubeconfig for a GKE cluster with an embedded OAuth token.
+
+    Builds the kubeconfig directly (server URL + CA cert + bearer token)
+    instead of using ``gcloud container clusters get-credentials``, which
+    generates a kubeconfig that depends on the ``gke-gcloud-auth-plugin``
+    exec credential provider — a binary not installed in the runner image.
+
+    This mirrors runwhen-local's ``generate_kubeconfig_for_gke`` which
+    deliberately avoids the gcloud exec plugin. Cluster endpoint + CA and
+    the OAuth bearer token both come from the same ``google.auth``
+    credentials — no gcloud CLI calls, so workload-identity / ADC runners
+    that authenticate via the metadata server work without separately
+    authenticating the gcloud CLI.
     
     Args:
         cluster_name: Name of the GKE cluster
@@ -194,7 +241,7 @@ def generate_kubeconfig_for_gke(cluster_name, zone_or_region, project_id=None, s
     """
     
     try:
-        # Authenticate first
+        # Authenticate first (resolves project_id from ADC/gcloud config)
         auth_success, resolved_project_id = gcloud_login(project_id, service_account_key)
         
         if not resolved_project_id:
@@ -210,40 +257,93 @@ def generate_kubeconfig_for_gke(cluster_name, zone_or_region, project_id=None, s
         if kubeconfig_dir:
             os.makedirs(kubeconfig_dir, exist_ok=True)
         
-        # Use gcloud to get cluster credentials
-        cmd = [
-            "gcloud", "container", "clusters", "get-credentials",
-            cluster_name,
-            f"--project={resolved_project_id}"
-        ]
-        
-        # Determine if it's a zone or region
-        if '-' in zone_or_region and zone_or_region.count('-') >= 2:
-            # Looks like a zone (e.g., us-central1-a)
-            cmd.extend([f"--zone={zone_or_region}"])
+        # Build google.auth credentials once — used for BOTH the Container
+        # API call (cluster details) and the kubeconfig bearer token. This
+        # avoids the gcloud CLI entirely, so workload-identity / ADC runners
+        # that authenticate via the metadata server work without separately
+        # authenticating gcloud.
+        import google.auth
+        import google.auth.transport.requests
+        import requests
+
+        if service_account_key:
+            from google.oauth2 import service_account
+            info = json.loads(service_account_key)
+            credentials = service_account.Credentials.from_service_account_info(
+                info, scopes=GKE_OAUTH_SCOPES
+            )
         else:
-            # Looks like a region (e.g., us-central1)
-            cmd.extend([f"--region={zone_or_region}"])
-        
-        # Set KUBECONFIG for this command
-        env = os.environ.copy()
-        env['KUBECONFIG'] = kubeconfig_path
-        
-        result = subprocess.run(cmd, capture_output=True, text=True, check=True, env=env)
-        
-        print("GKE kubeconfig generation output:", result.stdout)
-        if result.stderr:
-            print("GKE kubeconfig generation stderr:", result.stderr)
-        
+            credentials, _ = google.auth.default(scopes=GKE_OAUTH_SCOPES)
+
+        credentials.refresh(google.auth.transport.requests.Request())
+        oauth_token = credentials.token
+
+        if not oauth_token:
+            raise ValueError("Failed to obtain OAuth token for GKE kubeconfig")
+
+        # Fetch cluster endpoint + CA cert via the Container REST API using
+        # the same credentials (not gcloud CLI). The location path works for
+        # both zones and regions.
+        cluster_url = (
+            f"https://container.googleapis.com/v1/projects/{resolved_project_id}"
+            f"/locations/{zone_or_region}/clusters/{cluster_name}"
+        )
+        resp = requests.get(
+            cluster_url,
+            headers={"Authorization": f"Bearer {oauth_token}"},
+            timeout=30,
+        )
+        if resp.status_code != 200:
+            raise ValueError(
+                f"Container API returned {resp.status_code} for {cluster_url}: {resp.text}"
+            )
+        cluster_info = resp.json()
+        endpoint = cluster_info.get("endpoint")
+        ca_cert = cluster_info.get("masterAuth", {}).get("clusterCaCertificate")
+
+        if not endpoint or not ca_cert:
+            raise ValueError(
+                f"Container API response missing endpoint ({endpoint}) or CA cert ({ca_cert is not None})"
+            )
+
+        # Prepend https:// if not present (API returns bare IP)
+        server_url = endpoint if endpoint.startswith("https://") else f"https://{endpoint}"
+
+        # Build the kubeconfig directly — context name = cluster_name so it
+        # matches what workspace-builder generates as the CONTEXT variable.
+        kubeconfig = {
+            "apiVersion": "v1",
+            "kind": "Config",
+            "clusters": [{
+                "name": cluster_name,
+                "cluster": {
+                    "server": server_url,
+                    "certificate-authority-data": ca_cert,
+                },
+            }],
+            "users": [{
+                "name": f"{cluster_name}-user",
+                "user": {"token": oauth_token},
+            }],
+            "contexts": [{
+                "name": cluster_name,
+                "context": {
+                    "cluster": cluster_name,
+                    "user": f"{cluster_name}-user",
+                },
+            }],
+            "current-context": cluster_name,
+        }
+
+        with open(kubeconfig_path, "w") as f:
+            yaml.dump(kubeconfig, f, default_flow_style=False)
+
         logger.info(f"Successfully generated kubeconfig for GKE cluster {cluster_name} in {zone_or_region}")
+        print(f"Generated token-based kubeconfig for GKE cluster {cluster_name} (no gke-gcloud-auth-plugin required)")
         
-    except subprocess.CalledProcessError as e:
-        logger.error(f"Failed to generate kubeconfig for GKE cluster: {e}")
-        print(f"Failed to generate kubeconfig for GKE cluster: {e.stderr}", file=sys.stderr)
-        raise
     except Exception as e:
-        logger.error(f"Unexpected error generating kubeconfig: {e}")
-        print(f"Unexpected error generating kubeconfig: {e}", file=sys.stderr)
+        logger.error(f"Failed to generate kubeconfig for GKE cluster: {e}")
+        print(f"Failed to generate kubeconfig for GKE cluster: {e}", file=sys.stderr)
         raise
 
 def list_gke_clusters(project_id=None, service_account_key=None):
