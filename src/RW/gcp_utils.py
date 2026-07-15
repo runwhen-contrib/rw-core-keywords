@@ -220,9 +220,11 @@ def generate_kubeconfig_for_gke(cluster_name, zone_or_region, project_id=None, s
     exec credential provider — a binary not installed in the runner image.
 
     This mirrors runwhen-local's ``generate_kubeconfig_for_gke`` which
-    deliberately avoids the gcloud exec plugin: cluster endpoint + CA come
-    from ``gcloud container clusters describe``, and the OAuth bearer token
-    comes from ``google.auth.default()`` (ADC) or a service-account key.
+    deliberately avoids the gcloud exec plugin. Cluster endpoint + CA and
+    the OAuth bearer token both come from the same ``google.auth``
+    credentials — no gcloud CLI calls, so workload-identity / ADC runners
+    that authenticate via the metadata server work without separately
+    authenticating the gcloud CLI.
     
     Args:
         cluster_name: Name of the GKE cluster
@@ -232,7 +234,7 @@ def generate_kubeconfig_for_gke(cluster_name, zone_or_region, project_id=None, s
     """
     
     try:
-        # Authenticate first
+        # Authenticate first (resolves project_id from ADC/gcloud config)
         auth_success, resolved_project_id = gcloud_login(project_id, service_account_key)
         
         if not resolved_project_id:
@@ -248,39 +250,14 @@ def generate_kubeconfig_for_gke(cluster_name, zone_or_region, project_id=None, s
         if kubeconfig_dir:
             os.makedirs(kubeconfig_dir, exist_ok=True)
         
-        # Fetch cluster endpoint + CA cert via gcloud describe (avoids needing
-        # google-cloud-container pip package; gcloud CLI is available).
-        describe_cmd = [
-            "gcloud", "container", "clusters", "describe",
-            cluster_name,
-            f"--project={resolved_project_id}",
-            "--format=json",
-        ]
-        if '-' in zone_or_region and zone_or_region.count('-') >= 2:
-            describe_cmd.append(f"--zone={zone_or_region}")
-        else:
-            describe_cmd.append(f"--region={zone_or_region}")
-
-        describe_result = subprocess.run(
-            describe_cmd, capture_output=True, text=True, check=True,
-        )
-        cluster_info = json.loads(describe_result.stdout)
-        endpoint = cluster_info.get("endpoint")
-        ca_cert = cluster_info.get("masterAuth", {}).get("clusterCaCertificate")
-
-        if not endpoint or not ca_cert:
-            raise ValueError(
-                f"Cluster describe missing endpoint ({endpoint}) or CA cert ({ca_cert is not None})"
-            )
-
-        # Prepend https:// if not present (gcloud describe returns bare IP)
-        server_url = endpoint if endpoint.startswith("https://") else f"https://{endpoint}"
-
-        # Mint a short-lived OAuth bearer token to embed in the kubeconfig.
-        # This is the same token gke-gcloud-auth-plugin would fetch at runtime
-        # — we embed it directly so no exec plugin is needed.
+        # Build google.auth credentials once — used for BOTH the Container
+        # API call (cluster details) and the kubeconfig bearer token. This
+        # avoids the gcloud CLI entirely, so workload-identity / ADC runners
+        # that authenticate via the metadata server work without separately
+        # authenticating gcloud.
         import google.auth
         import google.auth.transport.requests
+        import requests
 
         if service_account_key:
             from google.oauth2 import service_account
@@ -296,6 +273,34 @@ def generate_kubeconfig_for_gke(cluster_name, zone_or_region, project_id=None, s
 
         if not oauth_token:
             raise ValueError("Failed to obtain OAuth token for GKE kubeconfig")
+
+        # Fetch cluster endpoint + CA cert via the Container REST API using
+        # the same credentials (not gcloud CLI). The location path works for
+        # both zones and regions.
+        cluster_url = (
+            f"https://container.googleapis.com/v1/projects/{resolved_project_id}"
+            f"/locations/{zone_or_region}/clusters/{cluster_name}"
+        )
+        resp = requests.get(
+            cluster_url,
+            headers={"Authorization": f"Bearer {oauth_token}"},
+            timeout=30,
+        )
+        if resp.status_code != 200:
+            raise ValueError(
+                f"Container API returned {resp.status_code} for {cluster_url}: {resp.text}"
+            )
+        cluster_info = resp.json()
+        endpoint = cluster_info.get("endpoint")
+        ca_cert = cluster_info.get("masterAuth", {}).get("clusterCaCertificate")
+
+        if not endpoint or not ca_cert:
+            raise ValueError(
+                f"Container API response missing endpoint ({endpoint}) or CA cert ({ca_cert is not None})"
+            )
+
+        # Prepend https:// if not present (API returns bare IP)
+        server_url = endpoint if endpoint.startswith("https://") else f"https://{endpoint}"
 
         # Build the kubeconfig directly — context name = cluster_name so it
         # matches what workspace-builder generates as the CONTEXT variable.
@@ -329,13 +334,9 @@ def generate_kubeconfig_for_gke(cluster_name, zone_or_region, project_id=None, s
         logger.info(f"Successfully generated kubeconfig for GKE cluster {cluster_name} in {zone_or_region}")
         print(f"Generated token-based kubeconfig for GKE cluster {cluster_name} (no gke-gcloud-auth-plugin required)")
         
-    except subprocess.CalledProcessError as e:
-        logger.error(f"Failed to generate kubeconfig for GKE cluster: {e}")
-        print(f"Failed to generate kubeconfig for GKE cluster: {e.stderr}", file=sys.stderr)
-        raise
     except Exception as e:
-        logger.error(f"Unexpected error generating kubeconfig: {e}")
-        print(f"Unexpected error generating kubeconfig: {e}", file=sys.stderr)
+        logger.error(f"Failed to generate kubeconfig for GKE cluster: {e}")
+        print(f"Failed to generate kubeconfig for GKE cluster: {e}", file=sys.stderr)
         raise
 
 def list_gke_clusters(project_id=None, service_account_key=None):
