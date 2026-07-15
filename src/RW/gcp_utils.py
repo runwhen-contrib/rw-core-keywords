@@ -260,6 +260,24 @@ def generate_kubeconfig_for_gke(cluster_name, zone_or_region, project_id=None, s
         if result.stderr:
             print("GKE kubeconfig generation stderr:", result.stderr)
         
+        # Rename the context to the cluster name so it matches what
+        # workspace-builder generates as the CONTEXT variable. AWS EKS
+        # achieves this with `--alias`; gcloud has no equivalent, so we
+        # rename the auto-generated context (gke_PROJECT_LOCATION_CLUSTER)
+        # post-hoc via kubectl.
+        current = subprocess.run(
+            ["kubectl", "config", "current-context"],
+            capture_output=True, text=True, env=env,
+        )
+        current_context = current.stdout.strip()
+        if current_context and current_context != cluster_name:
+            subprocess.run(
+                ["kubectl", "config", "rename-context",
+                 current_context, cluster_name],
+                capture_output=True, text=True, env=env,
+            )
+            logger.info(f"Renamed kubeconfig context '{current_context}' -> '{cluster_name}'")
+        
         logger.info(f"Successfully generated kubeconfig for GKE cluster {cluster_name} in {zone_or_region}")
         
     except subprocess.CalledProcessError as e:
