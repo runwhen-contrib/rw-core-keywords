@@ -105,10 +105,16 @@ def gcloud_login(project_id=None, service_account_key=None):
             adc_available = False
             try:
                 import google.auth
-                google.auth.default()
+                _, adc_project_id = google.auth.default()
                 adc_available = True
                 logger.info("CREDENTIAL_CACHE: Application Default Credentials already available from environment")
                 print("Application Default Credentials already available from environment, skipping login")
+                # google.auth.default() returns the project ID from the
+                # metadata server or credentials file — use it before
+                # falling back to gcloud config / env vars below.
+                if not project_id and adc_project_id:
+                    project_id = adc_project_id
+                    logger.info(f"CREDENTIAL_CACHE: Resolved project ID from ADC: {project_id}")
             except Exception:
                 pass
             
@@ -122,7 +128,8 @@ def gcloud_login(project_id=None, service_account_key=None):
                     "--no-launch-browser", "--quiet"
                 ], capture_output=True, text=True, check=True)
             
-            # Get project ID from gcloud if not provided
+            # Get project ID from gcloud config / env vars as a fallback
+            # (ADC may not always return one).
             if not project_id:
                 project_id = get_project_id(None)
         
