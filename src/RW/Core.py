@@ -6,10 +6,12 @@ Scope: Global
 
 import re
 import os
+import socket
 import json, typing
 import textwrap
 import datetime
 import logging
+from urllib.parse import urlparse
 from collections import OrderedDict
 from typing import Union, List, Dict
 from robot.libraries.BuiltIn import BuiltIn
@@ -17,8 +19,6 @@ from RW import platform
 from RW._mode import is_dev_mode
 
 if not is_dev_mode():
-    import socket
-    from urllib.parse import urlparse
     import requests
     from prometheus_client import CollectorRegistry
     from RW import fetchsecrets
@@ -58,6 +58,10 @@ class Core:
         self.otel_endpoint = None
         self.otel_provider = None
         self.otel_meter = None
+        if is_dev_mode():
+            self.debug_log("Dev mode detected. Skipping OTEL initialization.")
+            return
+
         # Attempt to read environment variable (or use default),
         # and then validate that the hostname is resolvable before init.
         otel_endpoint = os.environ.get("RW_OTEL_COLLECTOR_ENDPOINT", "").strip()
@@ -222,9 +226,14 @@ class Core:
         else:
             val = os.getenv(key, "")
 
-        if not val and optional:
-            self.builtin.set_suite_variable("${" + varname + "}", None)
-            return None
+        if not val:
+            if optional:
+                self.builtin.set_suite_variable("${" + varname + "}", None)
+                return None
+            raise ImportError(
+                f"Import Secret {varname}: no value found in dev mode "
+                f"for key '{key}'"
+            )
 
         ret = platform.Secret(varname, val)
         self.builtin.set_suite_variable("${" + varname + "}", ret)

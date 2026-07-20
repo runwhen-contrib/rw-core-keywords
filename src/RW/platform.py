@@ -406,14 +406,22 @@ def import_memo_variable(key: str):
     """
     if is_dev_mode():
         fkeys_json_str = os.getenv("RW_MEMO_FILE", "{}")
-        memos_from_files = json.loads(fkeys_json_str)
-        if key in memos_from_files:
-            with open(memos_from_files[key]) as fh:
+        try:
+            memos_from_files = json.loads(fkeys_json_str)
+        except json.JSONDecodeError as e:
+            warning_log(f"Invalid RW_MEMO_FILE JSON in dev mode: {e}")
+            return None
+
+        memo_path = memos_from_files.get(key)
+        if not memo_path:
+            return None
+
+        try:
+            with open(memo_path) as fh:
                 return fh.read()
-        raise ValueError(
-            f"Memo key {key} not found. Set RW_MEMO_FILE env var, e.g. "
-            f'RW_MEMO_FILE=\'{{"{ key}":"/path/to/file"}}\''
-        )
+        except OSError as e:
+            warning_log(f"Unable to read memo file for key '{key}': {e}")
+            return None
 
     try:
         slx_api_url = import_platform_variable("RW_SLX_API_URL")
