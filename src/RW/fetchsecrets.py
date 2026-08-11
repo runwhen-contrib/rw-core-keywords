@@ -935,13 +935,23 @@ def read_secret(key: str, _recursion_stack=None):
                 raise ValueError(f"Required fields (projectId, serviceAccountKey) missing in associated secrets.")
 
             if "kubeconfig" in key:
-                # Extract cluster info from the remaining key
+                # Extract cluster info from the remaining key.
+                # Supports two formats:
+                #   New (3-seg): project_id/cluster_name/location
+                #   Legacy (2-seg): cluster_name/location
                 cluster_info = remaining_key.split(":", 1)[-1]
                 cluster_parts = cluster_info.split("/")
-                if len(cluster_parts) != 2:
-                    raise ValueError(f"GKE cluster info should be in format 'cluster_name/zone_or_region', got: {cluster_info}")
-                
-                cluster_name, zone_or_region = cluster_parts
+                if len(cluster_parts) == 3:
+                    project_id_from_key, cluster_name, zone_or_region = cluster_parts
+                    if project_id_from_key and project_id_from_key != "undefined":
+                        project_id = project_id_from_key
+                elif len(cluster_parts) == 2:
+                    cluster_name, zone_or_region = cluster_parts
+                else:
+                    raise ValueError(
+                        f"GKE cluster info should be in format "
+                        f"'[project_id/]cluster_name/location', got: {cluster_info}"
+                    )
 
                 # Check for cached kubeconfig content in filesystem first
                 gcp_config_dir = os.environ.get('GOOGLE_APPLICATION_CREDENTIALS_DIR', '')
@@ -950,7 +960,7 @@ def read_secret(key: str, _recursion_stack=None):
                 
                 if gcp_config_dir:
                     # Create a safe filename for the cache (include project for SA isolation)
-                    cache_filename = f"kubeconfig_sa_{cluster_name.replace('/', '_')}_{zone_or_region.replace('/', '_')}_{project_id}_{hashlib.sha256(service_account_key.encode()).hexdigest()[:8]}.yaml"
+                    cache_filename = f"kubeconfig_sa_{project_id}_{cluster_name.replace('/', '_')}_{zone_or_region.replace('/', '_')}_{hashlib.sha256(service_account_key.encode()).hexdigest()[:8]}.yaml"
                     kubeconfig_cache_file = os.path.join(gcp_config_dir, cache_filename)
                     
                     if os.path.exists(kubeconfig_cache_file):
@@ -1029,13 +1039,23 @@ def read_secret(key: str, _recursion_stack=None):
                     project_id = read_secret(project_id_key, _recursion_stack)
 
             if "kubeconfig" in key:
-                # Extract cluster info from the remaining key
+                # Extract cluster info from the remaining key.
+                # Supports two formats:
+                #   New (3-seg): project_id/cluster_name/location
+                #   Legacy (2-seg): cluster_name/location
                 cluster_info = remaining_key.split(":", 1)[-1]
                 cluster_parts = cluster_info.split("/")
-                if len(cluster_parts) != 2:
-                    raise ValueError(f"GKE cluster info should be in format 'cluster_name/zone_or_region', got: {cluster_info}")
-                
-                cluster_name, zone_or_region = cluster_parts
+                if len(cluster_parts) == 3:
+                    project_id_from_key, cluster_name, zone_or_region = cluster_parts
+                    if project_id_from_key and project_id_from_key != "undefined":
+                        project_id = project_id_from_key
+                elif len(cluster_parts) == 2:
+                    cluster_name, zone_or_region = cluster_parts
+                else:
+                    raise ValueError(
+                        f"GKE cluster info should be in format "
+                        f"'[project_id/]cluster_name/location', got: {cluster_info}"
+                    )
 
                 # Check for cached kubeconfig content in filesystem first
                 gcp_config_dir = os.environ.get('GOOGLE_APPLICATION_CREDENTIALS_DIR', '')
@@ -1044,7 +1064,7 @@ def read_secret(key: str, _recursion_stack=None):
                 
                 if gcp_config_dir:
                     # Create a safe filename for the cache (ADC doesn't have service account key)
-                    cache_filename = f"kubeconfig_adc_{cluster_name.replace('/', '_')}_{zone_or_region.replace('/', '_')}_{project_id or 'default'}.yaml"
+                    cache_filename = f"kubeconfig_adc_{project_id or 'default'}_{cluster_name.replace('/', '_')}_{zone_or_region.replace('/', '_')}.yaml"
                     kubeconfig_cache_file = os.path.join(gcp_config_dir, cache_filename)
                     
                     if os.path.exists(kubeconfig_cache_file):
