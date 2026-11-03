@@ -28,6 +28,59 @@ LOCATION_VAULT_AUTH_MOUNT_POINT = os.getenv("RW_LOCATION_VAULT_AUTH_MOUNT_POINT"
 VAULT_APPROLE_ROLE_ID = os.getenv("RW_VAULT_APPROLE_ROLE_ID")
 VAULT_APPROLE_SECRET_ID = os.getenv("RW_VAULT_APPROLE_SECRET_ID")
 
+# --- De-Vault (PLAT-SEC-001) -------------------------------------------------
+# When the platform sources workspace secrets from PAPI instead of Vault, an
+# un-prefixed read_secret() resolves via PAPI. The runner sets
+# RW_SECRETS_SOURCE=papi and RW_PAPI_URL=<papi base url> on the task container.
+# Read at call time (not import) so tests can set them per case.
+def _secrets_source() -> str:
+    return (os.getenv("RW_SECRETS_SOURCE") or "vault").strip().lower()
+
+
+def _papi_url() -> str:
+    return (os.getenv("RW_PAPI_URL") or "").rstrip("/")
+
+
+def _default_provider() -> str:
+    """Provider for a key with no explicit '@provider:' prefix.
+
+    De-Vault: follow the deployment -- 'papi' when workspace secrets are sourced
+    from PAPI, else 'runwhen-vault'. This is what lets an un-prefixed
+    read_secret() resolve from PAPI with no codebundle change.
+    """
+    return "papi" if _secrets_source() == "papi" else "runwhen-vault"
+
+
+def _fetch_papi_secret(key: str) -> str:
+    """Resolve a workspace secret from PAPI's internal resolver (De-Vault).
+
+    Same workspace-key shape as the Vault path, so read_secret() resolves
+    identically whether the value lives in Vault or in PAPI's Postgres store --
+    PAPI decides.
+    """
+    papi_url = _papi_url()
+    if not papi_url:
+        raise AuthenticationError("RW_SECRETS_SOURCE=papi but RW_PAPI_URL is not set")
+    if not WORKSPACE_NAME:
+        raise AssertionError("RW_WORKSPACE is not set")
+    rsp = requests.post(
+        url=f"{papi_url}/internal/api/v1/runner/secrets/resolve",
+        json={"workspace": WORKSPACE_NAME, "keys": [key]},
+        timeout=15,
+        verify=REQUEST_VERIFY,
+    )
+    if rsp.status_code == 503:
+        # PAPI's source cannot serve workspace secrets yet (e.g. it is still in a
+        # vault-read mode). Distinguish that from "absent" so a codebundle fails
+        # loudly rather than silently getting nothing.
+        raise SecretNotFoundError(f"PAPI secrets source is unavailable for key '{key}': {rsp.text}")
+    if rsp.status_code != 200:
+        raise SecretNotFoundError(f"PAPI resolve failed for '{key}': {rsp.text} {rsp.status_code}")
+    values = (rsp.json() or {}).get("secrets") or {}
+    if key not in values:
+        raise SecretNotFoundError(f"Secret at key '{key}' not found with provider papi")
+    return values[key]
+
 # K8s by default mounts a token for the container's default service account at the following
 # path in the filesystem --
 KUBERNETES_SERVICE_ACCOUNT_TOKEN_PATH = "/var/run/secrets/kubernetes.io/serviceaccount/token"
@@ -47,6 +100,7 @@ logger = logging.getLogger(__name__)
 
 class SecretProvider(Enum):
     RUNWHEN_VAULT = "runwhen-vault"
+    PAPI = "papi"
     CUSTOM = "custom"
     FILE = "file"
     ENV = "env"
@@ -172,6 +226,15 @@ def health_check():
     """ Checks that any required vars for this secrets engine to work are, indeed, set.
         Raise AssertionError if this check fails.
     """
+    # De-Vault: when workspace secrets come from PAPI, Vault env is not required.
+    if _secrets_source() == "papi":
+        if not _papi_url() or not WORKSPACE_NAME:
+            raise AssertionError(
+                f"RW_SECRETS_SOURCE=papi needs RW_PAPI_URL and RW_WORKSPACE, but got"
+                + f" {_papi_url()}, {WORKSPACE_NAME}"
+            )
+        return
+
     # Make sure that the env vars we need exist
     if not VAULT_ADDR or not WORKSPACE_NAME or not LOCATION_NAME or not LOCATION_VAULT_AUTH_MOUNT_POINT or not VAULT_APPROLE_ROLE_ID:
         raise AssertionError(
@@ -593,7 +656,7 @@ def read_secret(key: str, _recursion_stack=None):
         provider, remaining_key = key.split(SECRET_PROVIDER_SYMBOL, 1)
         logger(f"Extracted provider: {provider}, remaining key: {remaining_key}", "DEBUG")
     else:
-        provider = "runwhen-vault"
+        provider = _default_provider()
         remaining_key = key
         logger(f"No explicit provider in key, using default: {provider}", "DEBUG")
 
@@ -641,6 +704,9 @@ def read_secret(key: str, _recursion_stack=None):
     elif provider == "runwhen-vault":
         _current_secret_provider = SecretProvider.RUNWHEN_VAULT
         logger("Provider matched as RunWhen Vault.", "DEBUG")
+    elif provider == "papi":
+        _current_secret_provider = SecretProvider.PAPI
+        logger("Provider matched as PAPI (De-Vault).", "DEBUG")
     else:
         _current_secret_provider = SecretProvider.CUSTOM
         logger(f"Provider did not match any known types, defaulting to Custom provider.", "DEBUG")
@@ -697,6 +763,10 @@ def read_secret(key: str, _recursion_stack=None):
             if rsp.status_code != 200:
                 raise SecretNotFoundError(f"Secret at key '{remaining_key}' not found: {rsp.text} {rsp.status_code} with provider {_current_secret_provider}")
             secret_data = rsp.json()["data"]["data"][vault_lookup]
+
+        elif _current_secret_provider == SecretProvider.PAPI:
+            logger(f"Fetching secret from PAPI for key: {remaining_key}", "DEBUG")
+            secret_data = _fetch_papi_secret(remaining_key)
 
         elif _current_secret_provider == SecretProvider.CUSTOM:
             SECRET_PROVIDER_TYPE = os.getenv(f"SECRET_PROVIDER_{provider}_TYPE") #TODO: handle other vault types
