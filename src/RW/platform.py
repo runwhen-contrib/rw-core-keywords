@@ -258,6 +258,16 @@ def console_log_if_true(condition: str, *msg) -> None:
 
 
 def form_access_token() -> str:
+    # A token handed to the task by the runner is the primary credential: PAPI
+    # mints it per run and runner-control injects it as RW_ACCESS_TOKEN, so the
+    # task needs no secret-store round-trip and no SA username/password. Honour
+    # it in every mode — not just dev — and fall back to the SA-credential
+    # exchange only when the runner did not provide one (older runners, local
+    # runs).
+    provided = os.getenv("RW_ACCESS_TOKEN")
+    if provided:
+        return provided
+
     if is_dev_mode():
         access_token = os.getenv("RW_ACCESS_TOKEN")
         if not access_token:
