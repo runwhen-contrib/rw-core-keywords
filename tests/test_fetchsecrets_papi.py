@@ -15,6 +15,7 @@ from RW import fetchsecrets
 def _no_papi_env(monkeypatch):
     monkeypatch.delenv("RW_SECRETS_SOURCE", raising=False)
     monkeypatch.delenv("RW_PAPI_URL", raising=False)
+    monkeypatch.setenv("RW_ACCESS_TOKEN", "run-token")
 
 
 def test_default_provider_is_vault_without_config():
@@ -38,6 +39,20 @@ def test_fetch_papi_secret_resolves_and_builds_the_right_request(monkeypatch):
     _, kwargs = post.call_args
     assert kwargs["url"] == "http://papi:8000/internal/api/v1/runner/secrets/resolve"
     assert kwargs["json"] == {"workspace": "acme", "keys": ["DB_PW"]}
+    # The run's token is the credential: PAPI binds the read to the workspace
+    # its service account belongs to, and refuses the call without it.
+    assert kwargs["headers"] == {"Authorization": "Bearer run-token"}
+
+
+def test_fetch_papi_secret_fails_closed_without_a_token(monkeypatch):
+    # A task that cannot prove who it is must not read secrets.
+    monkeypatch.setenv("RW_PAPI_URL", "http://papi:8000")
+    monkeypatch.delenv("RW_ACCESS_TOKEN")
+    monkeypatch.setattr(fetchsecrets, "WORKSPACE_NAME", "acme")
+    with patch.object(fetchsecrets.requests, "post") as post:
+        with pytest.raises(fetchsecrets.AuthenticationError):
+            fetchsecrets._fetch_papi_secret("DB_PW")
+    post.assert_not_called()
 
 
 def test_fetch_papi_secret_missing_key_raises_not_found(monkeypatch):

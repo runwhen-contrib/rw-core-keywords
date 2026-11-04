@@ -57,15 +57,28 @@ def _fetch_papi_secret(key: str) -> str:
     Same workspace-key shape as the Vault path, so read_secret() resolves
     identically whether the value lives in Vault or in PAPI's Postgres store --
     PAPI decides.
+
+    A task is authenticated: runner-control injects the run's RW_ACCESS_TOKEN,
+    which PAPI verifies and binds to the workspace's service account -- the
+    caller may name only its own workspace. The token is presented as a
+    Bearer credential and the call fails closed without it: a task that
+    cannot prove who it is must not read secrets.
     """
     papi_url = _papi_url()
     if not papi_url:
         raise AuthenticationError("RW_SECRETS_SOURCE=papi but RW_PAPI_URL is not set")
     if not WORKSPACE_NAME:
         raise AssertionError("RW_WORKSPACE is not set")
+    access_token = os.getenv("RW_ACCESS_TOKEN")
+    if not access_token:
+        raise AuthenticationError(
+            "RW_SECRETS_SOURCE=papi but RW_ACCESS_TOKEN is not set — the run's "
+            "token is the credential PAPI binds the read to"
+        )
     rsp = requests.post(
         url=f"{papi_url}/internal/api/v1/runner/secrets/resolve",
         json={"workspace": WORKSPACE_NAME, "keys": [key]},
+        headers={"Authorization": f"Bearer {access_token}"},
         timeout=15,
         verify=REQUEST_VERIFY,
     )
