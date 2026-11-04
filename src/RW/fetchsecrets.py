@@ -76,7 +76,7 @@ def _fetch_papi_secret(key: str) -> str:
             "token is the credential PAPI binds the read to"
         )
     rsp = requests.post(
-        url=f"{papi_url}/internal/api/v1/runner/secrets/resolve",
+        url=f"{papi_url}/api/v1/runner/secrets/resolve",
         json={"workspace": WORKSPACE_NAME, "keys": [key]},
         headers={"Authorization": f"Bearer {access_token}"},
         timeout=15,
