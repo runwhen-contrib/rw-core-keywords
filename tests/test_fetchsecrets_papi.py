@@ -37,7 +37,7 @@ def test_fetch_papi_secret_resolves_and_builds_the_right_request(monkeypatch):
     with patch.object(fetchsecrets.requests, "post", return_value=rsp) as post:
         assert fetchsecrets._fetch_papi_secret("DB_PW") == "s3cret"
     _, kwargs = post.call_args
-    assert kwargs["url"] == "http://papi:8000/internal/api/v1/runner/secrets/resolve"
+    assert kwargs["url"] == "http://papi:8000/api/v1/runner/secrets/resolve"
     assert kwargs["json"] == {"workspace": "acme", "keys": ["DB_PW"]}
     # The run's token is the credential: PAPI binds the read to the workspace
     # its service account belongs to, and refuses the call without it.
