@@ -20,7 +20,6 @@ from RW._mode import is_dev_mode
 
 if not is_dev_mode():
     import requests
-    from prometheus_client import CollectorRegistry
     from RW import fetchsecrets
 
     from opentelemetry import metrics
@@ -30,9 +29,6 @@ if not is_dev_mode():
         PeriodicExportingMetricReader,
     )
     from opentelemetry.exporter.otlp.proto.http.metric_exporter import OTLPMetricExporter
-
-    registry = CollectorRegistry()
-    prometheus_gchs = {}
 
 SHARED_LOCATION_SERVICES_NAMESPACE = "location"
 logger = logging.getLogger(__name__)
@@ -450,7 +446,7 @@ class Core:
 
     def run_keyword_and_push_metric(self, name: str, *args) -> None:
         """
-        Run a keyword and push the returned metric up to the MetricStore.
+        Run a keyword and export the returned metric over OTLP.
         This should only be called once per sli.robot file.
 
         Example:

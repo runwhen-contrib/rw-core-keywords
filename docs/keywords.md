@@ -773,7 +773,7 @@ Returns the contents of a session file, or None if the file did not exist
 
 #### Core.run_keyword_and_push_metric
 
-Run a keyword and push the returned metric up to the MetricStore.
+Run a keyword and export the returned metric over OTLP.
 This should only be called once per sli.robot file.
 
 **Arguments:**
@@ -821,7 +821,7 @@ Returns the contents of a session file, or None if the file did not exist
 
 #### run_keyword_and_push_metric
 
-Run a keyword and push the returned metric up to the MetricStore.
+Run a keyword and export the returned metric over OTLP.
 This should only be called once per sli.robot file.
 
 **Arguments:**
