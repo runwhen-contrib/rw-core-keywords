@@ -29,12 +29,25 @@ VAULT_APPROLE_ROLE_ID = os.getenv("RW_VAULT_APPROLE_ROLE_ID")
 VAULT_APPROLE_SECRET_ID = os.getenv("RW_VAULT_APPROLE_SECRET_ID")
 
 # --- De-Vault (PLAT-SEC-001) -------------------------------------------------
-# When the platform sources workspace secrets from PAPI instead of Vault, an
-# un-prefixed read_secret() resolves via PAPI. The runner sets
-# RW_SECRETS_SOURCE=papi and RW_PAPI_URL=<papi base url> on the task container.
-# Read at call time (not import) so tests can set them per case.
+# PAPI is the only platform secret source: an un-prefixed read_secret() and the
+# legacy 'runwhen-vault@' prefix both resolve via PAPI. The runner sets
+# RW_PAPI_URL=<papi base url> on the task container. Read at call time (not
+# import) so tests can set them per case.
+_vault_source_deprecation_logged = False
+
+
 def _secrets_source() -> str:
-    return (os.getenv("RW_SECRETS_SOURCE") or "vault").strip().lower()
+    """Platform secret source. Always 'papi'.
+
+    RW_SECRETS_SOURCE=vault is no longer honoured; it is logged once as
+    deprecated so a stale deployment setting is visible rather than silent.
+    """
+    global _vault_source_deprecation_logged
+    configured = (os.getenv("RW_SECRETS_SOURCE") or "").strip().lower()
+    if configured == "vault" and not _vault_source_deprecation_logged:
+        logger.warning("RW_SECRETS_SOURCE=vault is deprecated; using papi")
+        _vault_source_deprecation_logged = True
+    return "papi"
 
 
 def _papi_url() -> str:
@@ -42,13 +55,8 @@ def _papi_url() -> str:
 
 
 def _default_provider() -> str:
-    """Provider for a key with no explicit '@provider:' prefix.
-
-    De-Vault: follow the deployment -- 'papi' when workspace secrets are sourced
-    from PAPI, else 'runwhen-vault'. This is what lets an un-prefixed
-    read_secret() resolve from PAPI with no codebundle change.
-    """
-    return "papi" if _secrets_source() == "papi" else "runwhen-vault"
+    """Provider for a key with no explicit '@provider:' prefix: PAPI."""
+    return _secrets_source()
 
 
 def _fetch_papi_secret(key: str) -> str:
@@ -715,8 +723,9 @@ def read_secret(key: str, _recursion_stack=None):
     elif provider == "file":
         _current_secret_provider = SecretProvider.FILE
     elif provider == "runwhen-vault":
-        _current_secret_provider = SecretProvider.RUNWHEN_VAULT
-        logger("Provider matched as RunWhen Vault.", "DEBUG")
+        # Backward-compatible alias: the platform secret store is PAPI now.
+        _current_secret_provider = SecretProvider.PAPI
+        logger("Provider 'runwhen-vault' is an alias for PAPI.", "DEBUG")
     elif provider == "papi":
         _current_secret_provider = SecretProvider.PAPI
         logger("Provider matched as PAPI (De-Vault).", "DEBUG")

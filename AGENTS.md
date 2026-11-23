@@ -73,7 +73,7 @@ a keyword that behaves differently in dev vs production:
 
 See `src/RW/AGENTS.md` for detailed fetchsecrets guidelines. Key points:
 
-- Provider key format: `<provider>@<resource-path>` (keys without `@` → vault)
+- Provider key format: `<provider>@<resource-path>` (keys without `@` → PAPI; `runwhen-vault@` is an alias for PAPI)
 - All resolution happens in `fetchsecrets.py` — the Go worker is a passthrough
 - K8s secrets use direct API calls, not volume mounts
 - Kubeconfig values are written to execution-specific paths

@@ -18,8 +18,81 @@ def _no_papi_env(monkeypatch):
     monkeypatch.setenv("RW_ACCESS_TOKEN", "run-token")
 
 
-def test_default_provider_is_vault_without_config():
-    assert fetchsecrets._default_provider() == "runwhen-vault"
+def _papi_response(secrets):
+    rsp = MagicMock(status_code=200)
+    rsp.json.return_value = {"secrets": secrets}
+    return rsp
+
+
+@pytest.fixture
+def papi_read_env(monkeypatch):
+    """Env for an end-to-end read_secret() against a mocked PAPI resolver."""
+    monkeypatch.setenv("RW_PAPI_URL", "http://papi:8000")
+    monkeypatch.setenv("RW_SECRETS_KEYS", "{}")
+    monkeypatch.setattr(fetchsecrets, "WORKSPACE_NAME", "acme")
+    monkeypatch.setattr(fetchsecrets, "_cache", {})
+    with patch("robot.libraries.BuiltIn.BuiltIn"):
+        yield
+
+
+def test_default_provider_is_papi_without_config(papi_read_env):
+    # RW_SECRETS_SOURCE unset: an un-prefixed key resolves via PAPI.
+    with patch.object(fetchsecrets.requests, "post", return_value=_papi_response({"my-key": "v1"})) as post:
+        assert fetchsecrets.read_secret("my-key") == "v1"
+    assert post.call_count == 1
+    assert post.call_args.kwargs["json"] == {"workspace": "acme", "keys": ["my-key"]}
+
+
+def test_runwhen_vault_prefix_resolves_via_papi(papi_read_env):
+    # Existing codebundles that say runwhen-vault@ keep working, but via PAPI:
+    # no Vault client may be constructed.
+    with patch.object(fetchsecrets.hvac, "Client", side_effect=AssertionError("hvac.Client constructed")), \
+         patch.object(fetchsecrets.requests, "get", side_effect=AssertionError("Vault HTTP read")), \
+         patch.object(fetchsecrets.requests, "post", return_value=_papi_response({"my-key": "v2"})) as post:
+        assert fetchsecrets.read_secret("runwhen-vault@my-key") == "v2"
+    assert post.call_count == 1
+    assert post.call_args.kwargs["json"]["keys"] == ["my-key"]
+
+
+def test_rw_secrets_source_vault_is_deprecated_and_ignored(monkeypatch, caplog):
+    monkeypatch.setenv("RW_SECRETS_SOURCE", "vault")
+    monkeypatch.setattr(fetchsecrets, "_vault_source_deprecation_logged", False)
+    with caplog.at_level("WARNING", logger=fetchsecrets.logger.name):
+        assert fetchsecrets._secrets_source() == "papi"
+        assert fetchsecrets._default_provider() == "papi"
+    msgs = [r.getMessage() for r in caplog.records]
+    assert msgs.count("RW_SECRETS_SOURCE=vault is deprecated; using papi") == 1
+
+
+def test_service_account_keys_via_papi(papi_read_env, monkeypatch):
+    # platform.form_access_token() falls back to the SA credentials when the
+    # runner provides no RW_ACCESS_TOKEN; both keys must be read from PAPI.
+    import importlib
+
+    # Production path. Other test modules may leave RW.platform loaded in dev
+    # mode (no fetchsecrets/backoff), so load it fresh in production mode.
+    monkeypatch.delenv("RW_MODE", raising=False)
+    monkeypatch.delenv("ROBOT_DEV", raising=False)
+    importlib.reload(importlib.import_module("RW._mode"))
+    platform = importlib.reload(importlib.import_module("RW.platform"))
+    assert platform.fetchsecrets is fetchsecrets
+
+    monkeypatch.delenv("RW_ACCESS_TOKEN")
+    monkeypatch.setenv("RW_API_BASE_URL", "http://papi:8000")
+    asked = []
+
+    def fake_papi(key):
+        asked.append(key)
+        return {"rw-service-account-username": "sa", "rw-service-account-pw": "pw"}[key]
+
+    token_rsp = MagicMock(status_code=200)
+    token_rsp.json.return_value = {"access": "tok"}
+    with patch.object(fetchsecrets, "_fetch_papi_secret", side_effect=fake_papi), \
+         patch.object(fetchsecrets, "authenticate_vault_client", side_effect=AssertionError("Vault used")), \
+         patch.object(platform.requests, "post", return_value=token_rsp) as post:
+        assert platform.form_access_token() == "tok"
+    assert asked == ["rw-service-account-username", "rw-service-account-pw"]
+    assert post.call_args.kwargs["json"] == {"username": "sa", "password": "pw"}
 
 
 def test_default_provider_follows_the_deployment(monkeypatch):
