@@ -28,7 +28,7 @@ Mode is detected once at import time in `_mode.py`:
 the CodeCollection developer. Never change this default.
 
 In dev mode, heavy modules (`fetchsecrets`, `fetchfiles`, `aws_utils`,
-`azure_utils`, `gcp_utils`, OTEL, prometheus) are **not imported**. This keeps
+`azure_utils`, `gcp_utils`, OTEL) are **not imported**. This keeps
 the dev install lightweight — only `requests`, `PyYAML`, and `robotframework` are
 required.
 
@@ -52,7 +52,7 @@ required.
 Base dependencies (all modes): `PyYAML`, `requests`, `robotframework`.
 
 All dependencies are installed by default (`pip install rw-core-keywords`): azure, k8s,
-opentelemetry, hvac, prometheus-client, backoff, PyGithub.
+opentelemetry, hvac, backoff, PyGithub.
 
 When adding a new dependency, decide whether it's needed in dev mode. If not,
 add it to `[project.optional-dependencies] production` only.
