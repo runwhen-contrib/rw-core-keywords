@@ -5,11 +5,13 @@ presented to a customer's Vault server: customer providers authenticate with
 their own AppRole credentials only.
 """
 
+import json
 import os
 import sys
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
+import requests
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
@@ -38,45 +40,48 @@ def customer_vault_env(monkeypatch, tmp_path):
         yield
 
 
-def test_customer_vault_login_never_uses_platform_token(customer_vault_env):
-    tokens_seen = []
-    approle_logins = []
+def _json_response(payload):
+    rsp = requests.Response()
+    rsp.status_code = 200
+    rsp.headers["Content-Type"] = "application/json"
+    rsp._content = json.dumps(payload).encode()
+    return rsp
 
-    class RecordingClient:
-        def __init__(self, url=None, token=None, verify=None, **kwargs):
-            self.url = url
-            self._token = None
-            self.token = token
-            self.auth = MagicMock()
-            self.auth.approle.login.side_effect = self._approle_login
 
-        @property
-        def token(self):
-            return self._token
+@pytest.mark.parametrize("platform_token_source", ["VAULT_TOKEN", "~/.vault-token"])
+def test_customer_vault_login_never_uses_platform_token(
+    customer_vault_env, monkeypatch, tmp_path, platform_token_source
+):
+    # The real hvac.Client runs here: hvac falls back to VAULT_TOKEN, then
+    # ~/.vault-token, when no token is passed, so a stub client would hide a leak.
+    # VAULT_TOKEN_FILE is set by the fixture in both cases.
+    if platform_token_source == "~/.vault-token":
+        monkeypatch.delenv("VAULT_TOKEN")
+        (tmp_path / ".vault-token").write_text(PLATFORM_TOKEN)
+        monkeypatch.setenv("HOME", str(tmp_path))
 
-        @token.setter
-        def token(self, value):
-            tokens_seen.append(value)
-            self._token = value
+    sent = []
 
-        def is_authenticated(self):
-            return self._token is not None
+    def fake_request(session, method, url, **kwargs):
+        headers = {**session.headers, **(kwargs.get("headers") or {})}
+        sent.append((method.upper(), url, headers))
+        if url.endswith("/v1/auth/approle/login"):
+            return _json_response({"auth": {"client_token": CUSTOMER_TOKEN}})
+        if url == "https://vault.acme.example/v1/secret/data/x":
+            return _json_response({"data": {"data": {"value": "s3cr3t"}}})
+        raise AssertionError(f"unexpected request {method} {url}")
 
-        def _approle_login(self, role_id=None, secret_id=None, mount_point=None):
-            approle_logins.append((role_id, secret_id, mount_point))
-            self.token = CUSTOMER_TOKEN
-
-    vault_rsp = MagicMock(status_code=200)
-    vault_rsp.json.return_value = {"data": {"data": {"value": "s3cr3t"}}}
-
-    with patch.object(fetchsecrets.hvac, "Client", RecordingClient), \
-         patch.object(fetchsecrets.requests, "get", return_value=vault_rsp) as get:
+    with patch.object(requests.Session, "request", autospec=True, side_effect=fake_request):
         assert fetchsecrets.read_secret("acme@secret/data/x:value") == "s3cr3t"
 
-    assert PLATFORM_TOKEN not in tokens_seen
-    assert approle_logins == [("acme-role", "acme-secret", "approle")]
-    assert get.call_args.kwargs["headers"] == {"X-Vault-Token": CUSTOMER_TOKEN}
-    assert get.call_args.kwargs["url"] == "https://vault.acme.example/v1/secret/data/x"
+    assert [(m, u) for m, u, _ in sent] == [
+        ("POST", "https://vault.acme.example/v1/auth/approle/login"),
+        ("GET", "https://vault.acme.example/v1/secret/data/x"),
+    ]
+    for _, url, headers in sent:
+        assert PLATFORM_TOKEN not in headers.values(), url
+    assert "X-Vault-Token" not in sent[0][2]  # AppRole login carries no token
+    assert sent[1][2]["X-Vault-Token"] == CUSTOMER_TOKEN
 
 
 @pytest.mark.parametrize("name", ["_kubernetes_vault_login", "_try_cached_token_login", "VAULT_TOKEN_TTL"])

@@ -261,7 +261,10 @@ def _approle_vault_login(vault_addr: str, role_id: str, secret_id: str, auth_mou
     See https://hvac.readthedo  cs.io/en/stable/usage/auth_methods/approle.html
     """
     try:
-        client = hvac.Client(url=vault_addr, verify=REQUEST_VERIFY)
+        # token="" (not None): with no token, hvac falls back to the VAULT_TOKEN env
+        # var and ~/.vault-token, which would send the worker's platform token to a
+        # customer Vault on the login request.
+        client = hvac.Client(url=vault_addr, token="", verify=REQUEST_VERIFY)
         client.auth.approle.login(role_id=role_id, secret_id=secret_id, mount_point=auth_mount_point)
         return client
     except Exception as e:
