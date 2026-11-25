@@ -20,13 +20,8 @@ from . import aws_utils
 
 REQUEST_VERIFY=proxy.get_request_verify()
 
-# Updated to support RW_VAULT_ADDR with fallback to RW_VAULT_URL for legacy support
-VAULT_ADDR = os.getenv("RW_VAULT_ADDR") or os.getenv("RW_VAULT_URL")
 WORKSPACE_NAME = os.getenv("RW_WORKSPACE")
 LOCATION_NAME = os.getenv("RW_LOCATION")
-LOCATION_VAULT_AUTH_MOUNT_POINT = os.getenv("RW_LOCATION_VAULT_AUTH_MOUNT_POINT")
-VAULT_APPROLE_ROLE_ID = os.getenv("RW_VAULT_APPROLE_ROLE_ID")
-VAULT_APPROLE_SECRET_ID = os.getenv("RW_VAULT_APPROLE_SECRET_ID")
 
 # --- De-Vault (PLAT-SEC-001) -------------------------------------------------
 # PAPI is the only platform secret source: an un-prefixed read_secret() and the
@@ -110,7 +105,6 @@ KUBERNETES_SERVICE_ACCOUNT_TOKEN_PATH = "/var/run/secrets/kubernetes.io/servicea
 _cache = {}
 
 # Cache TTL settings (in seconds) - now primarily for documentation
-VAULT_TOKEN_TTL = int(os.getenv("RW_VAULT_TOKEN_CACHE_TTL", "1800"))  # 30 minutes
 AZURE_CREDENTIAL_TTL = int(os.getenv("RW_AZURE_CREDENTIAL_CACHE_TTL", "3600"))  # 1 hour
 GCP_CREDENTIAL_TTL = int(os.getenv("RW_GCP_CREDENTIAL_CACHE_TTL", "3600"))  # 1 hour
 AWS_CREDENTIAL_TTL = int(os.getenv("RW_AWS_CREDENTIAL_CACHE_TTL", "3600"))  # 1 hour
@@ -120,7 +114,6 @@ K8S_SECRET_CACHE_TTL = int(os.getenv("RW_K8S_SECRET_CACHE_TTL", "3600"))  # 1 ho
 logger = logging.getLogger(__name__)
 
 class SecretProvider(Enum):
-    RUNWHEN_VAULT = "runwhen-vault"
     PAPI = "papi"
     CUSTOM = "custom"
     FILE = "file"
@@ -139,7 +132,7 @@ class SecretProvider(Enum):
     K8S_FILE = "k8s-file"  # Read secret data from a Kubernetes Secret or ConfigMap (file mount)
     K8S_ENV = "k8s-env"  # Read secret data from a Kubernetes Secret or ConfigMap (env var)
     
-_current_secret_provider: SecretProvider = SecretProvider.RUNWHEN_VAULT
+_current_secret_provider: SecretProvider = SecretProvider.PAPI
 SECRET_PROVIDER_SYMBOL: str = "@"
 
 
@@ -247,20 +240,11 @@ def health_check():
     """ Checks that any required vars for this secrets engine to work are, indeed, set.
         Raise AssertionError if this check fails.
     """
-    # De-Vault: when workspace secrets come from PAPI, Vault env is not required.
-    if _secrets_source() == "papi":
-        if not _papi_url() or not WORKSPACE_NAME:
-            raise AssertionError(
-                f"RW_SECRETS_SOURCE=papi needs RW_PAPI_URL and RW_WORKSPACE, but got"
-                + f" {_papi_url()}, {WORKSPACE_NAME}"
-            )
-        return
-
-    # Make sure that the env vars we need exist
-    if not VAULT_ADDR or not WORKSPACE_NAME or not LOCATION_NAME or not LOCATION_VAULT_AUTH_MOUNT_POINT or not VAULT_APPROLE_ROLE_ID:
+    # Workspace secrets come from PAPI; platform Vault env is not used.
+    if not _papi_url() or not WORKSPACE_NAME:
         raise AssertionError(
-            f"Trying to fetch RW_VAULT_URL, RW_WORKSPACE and RW_LOCATION from env vars, but got"
-            + f" {VAULT_ADDR}, {WORKSPACE_NAME}, {LOCATION_NAME}, {LOCATION_VAULT_AUTH_MOUNT_POINT}, {VAULT_APPROLE_ROLE_ID}"
+            f"RW_SECRETS_SOURCE=papi needs RW_PAPI_URL and RW_WORKSPACE, but got"
+            + f" {_papi_url()}, {WORKSPACE_NAME}"
         )
 
 def about():
@@ -272,38 +256,6 @@ def about():
         "home_url": "https://runwhen.com/about/fetchsecrets",
     }
 
-def _kubernetes_vault_login(role: str, vault_url: str, auth_mount_point: str = LOCATION_VAULT_AUTH_MOUNT_POINT):
-    """Return an authenticated vault client for the role using K8s auth bootstrapping
-    
-    Args:
-    role (str): The role to use (see module vars above)
-    vault_url (str): Begins with https://, expected from settings
-    auth_mount_point (str): For corestate and backend, leave as default.  This changes only in the locations case where it should be
-    
-    Returns:
-    Authenticated hvac client, or throws FileNotFoundError (needs K8s sa token) or AuthenticationError
-    """
-    try:
-        with open(KUBERNETES_SERVICE_ACCOUNT_TOKEN_PATH, "r") as f:
-            token = f.read()
-            f.close()
-
-        client = hvac.Client(url=vault_url, verify=REQUEST_VERIFY)
-        client.auth.kubernetes.login(role, token, mount_point=auth_mount_point)
-        return client
-    except FileNotFoundError as e:
-        raise FileNotFoundError(
-            (
-                f"The K8s service account token was not found at path {KUBERNETES_SERVICE_ACCOUNT_TOKEN_PATH}.",
-                f"  This token bootstraps the vault auth process.  Is this being run from inside a K8s container?",
-            )
-        )
-    except Exception as e:
-        pod_service_account_name = os.getenv("MY_POD_SERVICE_ACCOUNT")
-        raise AuthenticationError(
-            f"Failed vault-k8s authentication using role {role}, auth mount point {auth_mount_point} and the k8s service account token found at {KUBERNETES_SERVICE_ACCOUNT_TOKEN_PATH} with MY_POD_SERVICE_ACCOUNT set to {pod_service_account_name}: {type(e)}: {str(e)}"
-        )
-
 def _approle_vault_login(vault_addr: str, role_id: str, secret_id: str, auth_mount_point: str):
     """Authenticate to Vault using AppRole auth method.
     See https://hvac.readthedo  cs.io/en/stable/usage/auth_methods/approle.html
@@ -314,53 +266,6 @@ def _approle_vault_login(vault_addr: str, role_id: str, secret_id: str, auth_mou
         return client
     except Exception as e:
         raise AuthenticationError(f"Failed AppRole authentication: {e}")
-
-
-def _try_cached_token_login(vault_addr: str):
-    """Try to authenticate using a cached token from file or environment.
-    
-    Priority:
-    1. VAULT_TOKEN_FILE - Read token from file (cached by worker)
-    2. VAULT_TOKEN - Direct token from environment
-    
-    Returns:
-        Authenticated hvac client if token is valid, None otherwise
-    """
-    def _authenticate_with_token(token: str, method: str, details: dict = None):
-        """Helper function to authenticate with a token and log the result."""
-        if not token or not token.strip():
-            return None
-        
-        token = token.strip()
-        try:
-            client = hvac.Client(url=vault_addr, token=token, verify=REQUEST_VERIFY)
-            if client.is_authenticated():
-                _log_vault_auth_method(method, True, details)
-                return client
-            else:
-                log_details = details.copy() if details else {}
-                log_details['reason'] = 'token_invalid'
-                _log_vault_auth_method(method, False, log_details)
-        except Exception as e:
-            log_details = details.copy() if details else {}
-            log_details['reason'] = str(e)
-            _log_vault_auth_method(method, False, log_details)
-        return None
-    
-    # Try to get token from file first
-    token_file = os.getenv('VAULT_TOKEN_FILE')
-    if token_file and os.path.exists(token_file):
-        try:
-            with open(token_file, 'r') as f:
-                token = f.read()
-            result = _authenticate_with_token(token, 'cached_file', {'token_file': token_file})
-            if result:
-                return result
-        except Exception as e:
-            _log_vault_auth_method('cached_file', False, {'reason': str(e), 'token_file': token_file})
-    
-    # Fall back to environment token
-    return _authenticate_with_token(os.getenv('VAULT_TOKEN'), 'environment')
 
 
 def _log_vault_auth_method(method: str, success: bool, details: dict = None):
@@ -387,41 +292,25 @@ def _log_vault_auth_method(method: str, success: bool, details: dict = None):
 
 
 def authenticate_vault_client(vault_addr: str, auth_mount_point: str, role_id: str=None, secret_id: str=None):
-    """Dynamically choose the authentication method based on available credentials.
-    
-    Priority:
-    1. VAULT_TOKEN_FILE - Read token from file (cached by worker)
-    2. VAULT_TOKEN - Direct token from environment
-    3. AppRole authentication (if role_id and secret_id provided)
-    4. Kubernetes authentication (fallback)
-    
-    Note: Vault tokens are naturally cached by the hvac library and shared filesystem
-    configuration, reducing the need for explicit credential caching.
+    """Authenticate to a customer Vault provider using its AppRole credentials.
+
+    Only the provider's own role_id/secret_id are used. The worker's platform
+    Vault token, from a token file or the environment, is never presented to a
+    customer Vault.
     """
-    # First, try cached token authentication (from file or environment)
-    cached_client = _try_cached_token_login(vault_addr)
-    if cached_client:
-        return cached_client
-    
-    # Fall back to traditional authentication methods
-    if role_id and secret_id:
-        logger.debug(f"Authenticating to Vault using AppRole method")
-        try:
-            client = _approle_vault_login(vault_addr, role_id, secret_id, auth_mount_point=auth_mount_point)
-            _log_vault_auth_method('approle', True)
-            return client
-        except Exception as e:
-            _log_vault_auth_method('approle', False, {'reason': str(e)})
-            raise
-    else:
-        logger.debug(f"Authenticating to Vault using Kubernetes auth method")
-        try:
-            client = _kubernetes_vault_login(role=WORKSPACE_NAME, vault_url=vault_addr, auth_mount_point=auth_mount_point)
-            _log_vault_auth_method('kubernetes', True)
-            return client
-        except Exception as e:
-            _log_vault_auth_method('kubernetes', False, {'reason': str(e)})
-            raise
+    if not role_id or not secret_id:
+        raise AuthenticationError(
+            f"Vault provider at {vault_addr} needs AppRole role_id and secret_id"
+        )
+    logger.debug(f"Authenticating to Vault using AppRole method")
+    try:
+        client = _approle_vault_login(vault_addr, role_id, secret_id, auth_mount_point=auth_mount_point)
+        _log_vault_auth_method('approle', True)
+        return client
+    except Exception as e:
+        _log_vault_auth_method('approle', False, {'reason': str(e)})
+        raise
+
 
 def _get_k8s_pod_namespace():
     """Return the namespace this pod is running in."""
@@ -632,7 +521,7 @@ def read_secret(key: str, _recursion_stack=None):
     """Reads a secret. Note that in order to read, this call must be made from a container that is
     running in a workspace (namespace) in a location. (See design notes above.)
 
-    This requires the RW_VAULT_URL, RW_WORKSPACE and RW_LOCATION env vars to be set.
+    Un-prefixed keys resolve via PAPI, which requires RW_PAPI_URL and RW_WORKSPACE to be set.
 
     key (str): Secret to read
     _recursion_stack (set): Internal parameter to track recursive calls and prevent circular dependencies
@@ -769,22 +658,6 @@ def read_secret(key: str, _recursion_stack=None):
             logger(f"K8S_CACHE: Cache {cache_status} for {kind}/{res_name}:{data_key}", "DEBUG")
 
             _handle_k8s_kubeconfig(secret_data, key, logger)
-
-        elif _current_secret_provider == SecretProvider.RUNWHEN_VAULT:
-            logger(f"Fetching secret from Vault for key: {remaining_key}", "DEBUG")
-            vault_lookup = "env"
-            client = authenticate_vault_client(
-                vault_addr=VAULT_ADDR,
-                auth_mount_point=LOCATION_VAULT_AUTH_MOUNT_POINT,
-                role_id=VAULT_APPROLE_ROLE_ID,
-                secret_id=VAULT_APPROLE_SECRET_ID,
-            )
-            url = f"{VAULT_ADDR}/v1/workspaces/data/{WORKSPACE_NAME}/{remaining_key}"
-            headers = {"X-Vault-Token": client.token}
-            rsp = requests.get(url=url, headers=headers, verify=REQUEST_VERIFY)
-            if rsp.status_code != 200:
-                raise SecretNotFoundError(f"Secret at key '{remaining_key}' not found: {rsp.text} {rsp.status_code} with provider {_current_secret_provider}")
-            secret_data = rsp.json()["data"]["data"][vault_lookup]
 
         elif _current_secret_provider == SecretProvider.PAPI:
             logger(f"Fetching secret from PAPI for key: {remaining_key}", "DEBUG")
@@ -1642,8 +1515,7 @@ def log_credential_cache_status():
     
     # Log environment variables that affect credential context
     context_vars = [
-        'RW_WORKSPACE', 'RW_LOCATION', 'RW_VAULT_ADDR', 
-        'RW_VAULT_APPROLE_ROLE_ID', 'RW_LOCATION_VAULT_AUTH_MOUNT_POINT',
+        'RW_WORKSPACE', 'RW_LOCATION', 'RW_PAPI_URL',
         'AWS_DEFAULT_REGION', 'AWS_REGION'
     ]
     

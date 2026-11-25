@@ -32,7 +32,6 @@ def test_basic_logging():
         }),
         'RW_WORKSPACE': 'test-workspace',
         'RW_LOCATION': 'test-location',
-        'RW_VAULT_ADDR': 'https://test.vault.com',
         'TMPDIR': '/tmp/test_logging',
         'AZURE_CONFIG_DIR': '/tmp/test_logging/shared_config/abc123def456/.azure',
         'CLOUDSDK_CONFIG': '/tmp/test_logging/shared_config/abc123def456/.gcloud'

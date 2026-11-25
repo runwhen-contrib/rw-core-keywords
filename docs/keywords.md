@@ -887,7 +887,7 @@ Where can this file be found (if it exists) by other systems with appropriate cr
 Reads a secret. Note that in order to read, this call must be made from a container that is
 running in a workspace (namespace) in a location. (See design notes above.)
 
-This requires the RW_VAULT_URL, RW_WORKSPACE and RW_LOCATION env vars to be set.
+Un-prefixed keys resolve via PAPI, which requires RW_PAPI_URL and RW_WORKSPACE to be set.
 
 key (str): Secret to read
 
@@ -1460,7 +1460,9 @@ Returns a dict of info identifying this particular fetchsecrets plugin
 
 #### authenticate_vault_client
 
-Dynamically choose the authentication method based on available environment variables.
+Authenticate to a customer Vault provider using its AppRole credentials.
+Only the provider's own role_id/secret_id are used; the worker's platform
+Vault token is never presented to a customer Vault.
 
 **Arguments:**
 
