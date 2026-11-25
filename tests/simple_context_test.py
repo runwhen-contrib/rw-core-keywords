@@ -21,10 +21,7 @@ def generate_credential_context_hash():
     # Add relevant environment variables that affect credential context
     context_vars = [
         'RW_WORKSPACE',
-        'RW_LOCATION', 
-        'RW_VAULT_ADDR',
-        'RW_VAULT_APPROLE_ROLE_ID',
-        'RW_LOCATION_VAULT_AUTH_MOUNT_POINT'
+        'RW_LOCATION'
     ]
     
     for var in context_vars:

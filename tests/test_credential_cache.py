@@ -21,12 +21,8 @@ from RW import fetchsecrets, Core
 def setup_test_environment():
     """Set up test environment variables."""
     os.environ.update({
-        'RW_VAULT_ADDR': 'https://test-vault.example.com',
         'RW_WORKSPACE': 'test-workspace',
         'RW_LOCATION': 'test-location',
-        'RW_LOCATION_VAULT_AUTH_MOUNT_POINT': 'auth/kubernetes',
-        'RW_VAULT_APPROLE_ROLE_ID': 'test-role-id',
-        'RW_VAULT_APPROLE_SECRET_ID': 'test-secret-id',
         'RW_SECRETS_KEYS': json.dumps({
             'TEST_SECRET_1': 'secret/test1',
             'TEST_SECRET_2': 'secret/test2',
@@ -34,7 +30,6 @@ def setup_test_environment():
             'AZURE_SECRET': 'azure:identity@kubeconfig:myRG/myCluster',
         }),
         # Set shorter cache TTLs for testing
-        'RW_VAULT_TOKEN_CACHE_TTL': '300',  # 5 minutes
         'RW_AZURE_CREDENTIAL_CACHE_TTL': '600',  # 10 minutes
     })
 
@@ -113,46 +108,38 @@ def test_cache_expiration():
     """Test cache expiration functionality."""
     print("\n=== Testing Cache Expiration ===")
     
-    # Set very short TTL for testing
-    original_ttl = fetchsecrets.VAULT_TOKEN_TTL
-    fetchsecrets.VAULT_TOKEN_TTL = 2  # 2 seconds
+    mock_client, mock_response = mock_vault_authentication()
     
-    try:
-        mock_client, mock_response = mock_vault_authentication()
+    with patch('RW.fetchsecrets.authenticate_vault_client', return_value=mock_client) as mock_auth, \
+         patch('requests.get', return_value=mock_response):
         
-        with patch('RW.fetchsecrets.authenticate_vault_client', return_value=mock_client) as mock_auth, \
-             patch('requests.get', return_value=mock_response):
-            
-            core = Core.Core()
-            core.clear_all_credential_caches()
-            
-            # First import
-            print("1. First import (creates cache entry)...")
-            core.import_secret('TEST_SECRET_1')
-            print(f"   Authentication calls: {mock_auth.call_count}")
-            
-            # Second import immediately (should use cache)
-            print("2. Second import immediately (should use cache)...")
-            core.import_secret('TEST_SECRET_2')
-            print(f"   Authentication calls: {mock_auth.call_count}")
-            
-            # Wait for cache to expire
-            print("3. Waiting for cache to expire...")
-            time.sleep(3)
-            
-            # Third import after expiration (should re-authenticate)
-            print("4. Third import after expiration (should re-authenticate)...")
-            core.import_secret('TEST_SECRET_3')
-            print(f"   Authentication calls: {mock_auth.call_count}")
-            
-            # Verify cache cleanup
-            core.clear_expired_credential_caches()
-            stats = core.get_credential_cache_stats()
-            print(f"   Cache stats after cleanup: {stats}")
-            
-    finally:
-        # Restore original TTL
-        fetchsecrets.VAULT_TOKEN_TTL = original_ttl
+        core = Core.Core()
+        core.clear_all_credential_caches()
+        
+        # First import
+        print("1. First import (creates cache entry)...")
+        core.import_secret('TEST_SECRET_1')
+        print(f"   Authentication calls: {mock_auth.call_count}")
+        
+        # Second import immediately (should use cache)
+        print("2. Second import immediately (should use cache)...")
+        core.import_secret('TEST_SECRET_2')
+        print(f"   Authentication calls: {mock_auth.call_count}")
+        
+        # Wait for cache to expire
+        print("3. Waiting for cache to expire...")
+        time.sleep(3)
+        
+        # Third import after expiration (should re-authenticate)
+        print("4. Third import after expiration (should re-authenticate)...")
+        core.import_secret('TEST_SECRET_3')
+        print(f"   Authentication calls: {mock_auth.call_count}")
+        
+        # Verify cache cleanup
+        core.clear_expired_credential_caches()
+        stats = core.get_credential_cache_stats()
+        print(f"   Cache stats after cleanup: {stats}")
+
 
 def test_azure_credential_caching():
     """Test Azure credential caching functionality."""

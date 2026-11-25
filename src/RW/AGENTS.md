@@ -4,7 +4,8 @@
 
 All secret keys in `RW_SECRETS_KEYS` follow the pattern `<provider>@<resource-path>`.
 The `@` symbol (`SECRET_PROVIDER_SYMBOL`) splits provider from path. Keys without `@`
-default to RunWhen vault.
+resolve via PAPI (the platform secret store). The legacy `runwhen-vault@` prefix is
+an alias for PAPI.
 
 ## K8s secret providers (`k8s:file`, `k8s:env`)
 

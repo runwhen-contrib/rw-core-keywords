@@ -23,8 +23,8 @@ Set `RW_MODE=dev` in your environment to activate dev mode.
 pip install rw-core-keywords
 ```
 
-Includes all cloud provider SDKs, OpenTelemetry, Vault client, and other
-production dependencies.
+Includes all cloud provider SDKs, OpenTelemetry, a Vault client (for customer
+Vault secret providers), and other production dependencies.
 
 ## Runtime Modes
 
@@ -65,8 +65,10 @@ export RW_FROM_FILE='{"kubeconfig":"/home/user/auth/kubeconfig"}'
 export RW_SECRET_REMAP='{"my_token":"MY_LOCAL_TOKEN_VAR"}'
 ```
 
-**Production**: resolves via `fetchsecrets` from Vault, Kubernetes secrets,
-Azure, GCP, or AWS providers based on `RW_SECRETS_KEYS` configuration.
+**Production**: resolves via `fetchsecrets` from PAPI (the platform secret
+store; un-prefixed and `runwhen-vault@` keys), customer Vault providers
+(`SECRET_PROVIDER_<NAME>_TYPE=vault`, AppRole), Kubernetes secrets, Azure, GCP,
+or AWS providers based on `RW_SECRETS_KEYS` configuration.
 
 ### User Variables
 

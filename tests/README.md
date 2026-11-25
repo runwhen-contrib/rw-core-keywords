@@ -152,7 +152,7 @@ python3 tests/test_credential_cache.py
 
 1. **Missing Dependencies**:
    ```bash
-   pip3 install requests hvac azure-identity azure-mgmt-containerservice azure-mgmt-resource azure-mgmt-subscription PyYAML robotframework backoff prometheus_client
+   pip3 install requests hvac azure-identity azure-mgmt-containerservice azure-mgmt-resource azure-mgmt-subscription PyYAML robotframework backoff
    ```
 
 2. **Permission Issues**:

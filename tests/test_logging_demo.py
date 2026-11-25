@@ -33,7 +33,6 @@ def test_credential_cache_logging():
         }),
         'RW_WORKSPACE': 'test-workspace',
         'RW_LOCATION': 'test-location',
-        'RW_VAULT_ADDR': 'https://test.vault.com',
         'TMPDIR': '/tmp/test_logging'
     })
     

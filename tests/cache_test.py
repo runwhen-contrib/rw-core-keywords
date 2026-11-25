@@ -8,12 +8,8 @@ import json
 
 # Test environment setup
 os.environ.update({
-    'RW_VAULT_ADDR': 'https://test.vault.com',
     'RW_WORKSPACE': 'test',
     'RW_LOCATION': 'test',
-    'RW_LOCATION_VAULT_AUTH_MOUNT_POINT': 'auth/k8s',
-    'RW_VAULT_APPROLE_ROLE_ID': 'test-role',
-    'RW_VAULT_APPROLE_SECRET_ID': 'test-secret',
     'RW_SECRETS_KEYS': json.dumps({
         'TEST_SECRET': 'runwhen-vault@secret/test:field',
         'AZURE_KUBECONFIG': 'azure:identity@kubeconfig:myRG/myCluster'
